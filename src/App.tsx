@@ -18,6 +18,7 @@ export default function App() {
   const [appState, setAppState] = useState<AppState>("idle");
 
   const qrCanvasRef = useRef<HTMLCanvasElement>(null);
+  const processingRef = useRef(false);
 
   // ── QR generation ──────────────────────────────────────────────────────────
 
@@ -113,11 +114,13 @@ export default function App() {
         setAppState("not-found");
         setTimeout(() => setAppState("idle"), 2500);
       }
+      processingRef.current = false;
     };
 
     img.onerror = () => {
       URL.revokeObjectURL(url);
       setAppState("error");
+      processingRef.current = false;
       setTimeout(() => setAppState("idle"), 2500);
     };
 
@@ -125,20 +128,60 @@ export default function App() {
   }, []);
 
   // ── Global paste listener ──────────────────────────────────────────────────
+  //
+  // Two complementary paths:
+  //
+  //  1. keydown Ctrl/Cmd+V  →  navigator.clipboard.read()
+  //     Primary path on Windows. WebView2's ClipboardEvent.clipboardData
+  //     sometimes doesn't expose image items, but the Clipboard API works
+  //     reliably. processingRef prevents a second invocation from path 2.
+  //
+  //  2. paste event  →  ClipboardEvent.clipboardData
+  //     Primary path on macOS (and fallback on Windows when path 1 skips
+  //     because processingRef is already set).
 
   useEffect(() => {
+    const handleKeyDown = async (e: KeyboardEvent) => {
+      if (!((e.ctrlKey || e.metaKey) && e.key === "v")) return;
+      if (processingRef.current) return;
+
+      try {
+        const clipItems = await navigator.clipboard.read();
+        for (const clipItem of clipItems) {
+          const imgType = clipItem.types.find((t) => t.startsWith("image/"));
+          if (imgType) {
+            const blob = await clipItem.getType(imgType);
+            processingRef.current = true;
+            processImage(new File([blob], "paste", { type: imgType }));
+            return;
+          }
+        }
+      } catch {
+        // clipboard.read() unavailable or no image — paste event handles it
+      }
+    };
+
     const handlePaste = (e: ClipboardEvent) => {
+      if (processingRef.current) return; // already handled by keydown path
+
       const items = Array.from(e.clipboardData?.items ?? []);
       const imageItem = items.find((item) => item.type.startsWith("image/"));
       if (!imageItem) return; // no image — let text paste fall through normally
 
       e.preventDefault();
       const file = imageItem.getAsFile();
-      if (file) processImage(file);
+      if (file) {
+        processingRef.current = true;
+        processImage(file);
+      }
     };
 
+    document.addEventListener("keydown", handleKeyDown);
     document.addEventListener("paste", handlePaste);
-    return () => document.removeEventListener("paste", handlePaste);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("paste", handlePaste);
+    };
   }, [processImage]);
 
   // ── Copy ───────────────────────────────────────────────────────────────────

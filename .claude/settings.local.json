@@ -9,7 +9,8 @@
       "Bash(python3:*)",
       "Bash(cargo check:*)",
       "Bash(node scripts/package.js)",
-      "Bash(node scripts/package.cjs)"
+      "Bash(node scripts/package.cjs)",
+      "Bash(npx tsc:*)"
     ]
   }
 }
