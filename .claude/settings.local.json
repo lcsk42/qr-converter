@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(magick --version)",
+      "Bash(magick -size 1024x1024 xc:#3b82f6 /Users/lucaschen/Documents/code/com.lcsk42/qr-converter/src-tauri/icons/source.png)",
+      "Bash(npm run:*)",
+      "Bash(python3 -c \"from PIL import Image, ImageDraw; print\\('pillow ok'\\)\")",
+      "Bash(pip3 install:*)",
+      "Bash(python3:*)",
+      "Bash(cargo check:*)",
+      "Bash(node scripts/package.js)",
+      "Bash(node scripts/package.cjs)"
+    ]
+  }
+}
