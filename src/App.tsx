@@ -1,7 +1,28 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import jsQR from "jsqr";
 import qrcode from "qrcode-generator";
 import { Copy, Check } from "lucide-react";
+
+// ── Logger ─────────────────────────────────────────────────────────────────────
+// Writes to both the browser console and the on-disk log file via Tauri.
+// Errors from write_log are silently swallowed so they never break the UI.
+
+function fmt(...args: unknown[]): string {
+  return args
+    .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
+    .join(" ");
+}
+function log(...args: unknown[]) {
+  const msg = fmt(...args);
+  console.log(msg);
+  invoke("write_log", { message: msg }).catch(() => {});
+}
+function logError(...args: unknown[]) {
+  const msg = fmt(...args);
+  console.error(msg);
+  invoke("write_log", { message: `ERROR: ${msg}` }).catch(() => {});
+}
 
 type AppState = "idle" | "processing" | "not-found" | "error";
 
@@ -81,20 +102,23 @@ export default function App() {
   // ── Image → jsQR ───────────────────────────────────────────────────────────
 
   const processImage = useCallback((file: File) => {
+    log("[processImage] start", { name: file.name, type: file.type, size: file.size });
     setAppState("processing");
 
     const url = URL.createObjectURL(file);
     const img = new Image();
 
     img.onload = () => {
-      // Scale down very large screenshots for jsQR performance
       const MAX_DIM = 2000;
       let w = img.naturalWidth;
       let h = img.naturalHeight;
+      log("[processImage] image loaded", { naturalWidth: w, naturalHeight: h });
+
       if (w > MAX_DIM || h > MAX_DIM) {
         const scale = MAX_DIM / Math.max(w, h);
         w = Math.floor(w * scale);
         h = Math.floor(h * scale);
+        log("[processImage] scaled down to", { w, h });
       }
 
       const offscreen = document.createElement("canvas");
@@ -105,7 +129,9 @@ export default function App() {
       URL.revokeObjectURL(url);
 
       const imageData = ctx.getImageData(0, 0, w, h);
+      log("[processImage] running jsQR on", { w, h, dataLength: imageData.data.length });
       const result = jsQR(imageData.data, w, h);
+      log("[processImage] jsQR result", result ? { data: result.data } : null);
 
       if (result) {
         setText(result.data);
@@ -117,7 +143,8 @@ export default function App() {
       processingRef.current = false;
     };
 
-    img.onerror = () => {
+    img.onerror = (e) => {
+      logError("[processImage] image load error", e);
       URL.revokeObjectURL(url);
       setAppState("error");
       processingRef.current = false;
@@ -143,33 +170,56 @@ export default function App() {
   useEffect(() => {
     const handleKeyDown = async (e: KeyboardEvent) => {
       if (!((e.ctrlKey || e.metaKey) && e.key === "v")) return;
+      log("[keydown] Ctrl/Cmd+V detected, processingRef=", processingRef.current);
       if (processingRef.current) return;
 
       try {
+        log("[keydown] calling navigator.clipboard.read()...");
         const clipItems = await navigator.clipboard.read();
-        for (const clipItem of clipItems) {
+        log("[keydown] clipboard.read() returned", clipItems.length, "item(s)");
+
+        for (let i = 0; i < clipItems.length; i++) {
+          const clipItem = clipItems[i];
+          log(`[keydown] item[${i}] types:`, clipItem.types);
           const imgType = clipItem.types.find((t) => t.startsWith("image/"));
           if (imgType) {
+            log("[keydown] found image type:", imgType);
             const blob = await clipItem.getType(imgType);
+            log("[keydown] blob size:", blob.size, "type:", blob.type);
             processingRef.current = true;
             processImage(new File([blob], "paste", { type: imgType }));
             return;
           }
         }
-      } catch {
-        // clipboard.read() unavailable or no image — paste event handles it
+        log("[keydown] no image type found in clipboard items");
+      } catch (err) {
+        logError("[keydown] clipboard.read() failed:", err);
       }
     };
 
     const handlePaste = (e: ClipboardEvent) => {
-      if (processingRef.current) return; // already handled by keydown path
+      log("[paste] event fired, processingRef=", processingRef.current);
+      if (processingRef.current) {
+        log("[paste] skipped (already processing)");
+        return;
+      }
 
       const items = Array.from(e.clipboardData?.items ?? []);
+      log("[paste] clipboardData.items count:", items.length);
+      items.forEach((item, i) => {
+        log(`[paste] item[${i}] kind=${item.kind} type=${item.type}`);
+      });
+
       const imageItem = items.find((item) => item.type.startsWith("image/"));
-      if (!imageItem) return; // no image — let text paste fall through normally
+      if (!imageItem) {
+        log("[paste] no image item found, letting text paste through");
+        return;
+      }
 
       e.preventDefault();
+      log("[paste] found image item:", imageItem.type);
       const file = imageItem.getAsFile();
+      log("[paste] getAsFile():", file ? `size=${file.size}` : "null");
       if (file) {
         processingRef.current = true;
         processImage(file);
