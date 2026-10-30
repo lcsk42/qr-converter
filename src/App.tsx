@@ -4,6 +4,14 @@ import jsQR from "jsqr";
 import qrcode from "qrcode-generator";
 import { Copy, Check } from "lucide-react";
 
+// ── UTF-8 encoding for QR generation ───────────────────────────────────────────
+// qrcode-generator defaults to "default" stringToBytes, which keeps only the low
+// 8 bits of each charCode (Latin-1). Any non-ASCII text would be silently
+// mangled into garbage bytes. Must be set before qr.addData(), since QR8bitByte
+// reads qrcode.stringToBytes at construction time.
+
+qrcode.stringToBytes = qrcode.stringToBytesFuncs["UTF-8"];
+
 // ── Logger ─────────────────────────────────────────────────────────────────────
 // Writes to both the browser console and the on-disk log file via Tauri.
 // Errors from write_log are silently swallowed so they never break the UI.
@@ -24,7 +32,23 @@ function logError(...args: unknown[]) {
   invoke("write_log", { message: `ERROR: ${msg}` }).catch(() => {});
 }
 
-type AppState = "idle" | "processing" | "not-found" | "error";
+// ── QR payload decoding ────────────────────────────────────────────────────────
+// jsQR decodes each byte-mode segment with decodeURIComponent and swallows the
+// error when the bytes aren't valid UTF-8, so `result.data` comes back empty for
+// GBK/GB18030 payloads (common in QR codes from older Chinese/Windows tools that
+// don't emit an ECI segment). The raw bytes survive in `result.binaryData`, so
+// decode those ourselves: strict UTF-8 first, then fall back to GB18030.
+
+function decodePayload(bytes: Uint8ClampedArray | number[]): string {
+  const buf = new Uint8Array(bytes).buffer as ArrayBuffer;
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(buf);
+  } catch {
+    return new TextDecoder("gb18030").decode(buf);
+  }
+}
+
+type AppState = "idle" | "processing" | "not-found" | "decode-error" | "error";
 
 const isMac =
   typeof navigator !== "undefined" &&
@@ -131,13 +155,27 @@ export default function App() {
       const imageData = ctx.getImageData(0, 0, w, h);
       log("[processImage] running jsQR on", { w, h, dataLength: imageData.data.length });
       const result = jsQR(imageData.data, w, h);
-      log("[processImage] jsQR result", result ? { data: result.data } : null);
+      log(
+        "[processImage] jsQR result",
+        result
+          ? { data: result.data, byteLength: result.binaryData.length }
+          : null
+      );
 
-      if (result) {
-        setText(result.data);
+      // Decode the raw payload bytes rather than result.data: jsQR leaves
+      // `data` empty whenever the bytes aren't valid UTF-8 (see decodePayload).
+      // An empty result after that is a genuine decode failure, not "no QR".
+      const decoded = result ? decodePayload(result.binaryData) : "";
+      if (result && decoded !== result.data) {
+        log("[processImage] payload is not UTF-8, decoded via GB18030 fallback");
+      }
+      log("[processImage] decoded text length", decoded.length);
+
+      if (result && decoded !== "") {
+        setText(decoded);
         setAppState("idle");
       } else {
-        setAppState("not-found");
+        setAppState(result ? "decode-error" : "not-found");
         setTimeout(() => setAppState("idle"), 2500);
       }
       processingRef.current = false;
@@ -254,12 +292,14 @@ export default function App() {
   const statusText: Partial<Record<AppState, string>> = {
     processing: "Detecting QR code…",
     "not-found": "No QR code found in pasted image",
+    "decode-error": "QR code found, but its content isn't valid UTF-8 text",
     error: "Could not read image from clipboard",
   };
 
   const statusColor: Partial<Record<AppState, string>> = {
     processing: "text-zinc-400",
     "not-found": "text-orange-500",
+    "decode-error": "text-orange-500",
     error: "text-red-500",
   };
 
