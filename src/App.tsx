@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import jsQR from "jsqr";
 import qrcode from "qrcode-generator";
 import { Copy, Check } from "lucide-react";
+import { isMac } from "./platform";
 
 // ── UTF-8 encoding for QR generation ───────────────────────────────────────────
 // qrcode-generator defaults to "default" stringToBytes, which keeps only the low
@@ -39,7 +40,7 @@ function logError(...args: unknown[]) {
 // don't emit an ECI segment). The raw bytes survive in `result.binaryData`, so
 // decode those ourselves: strict UTF-8 first, then fall back to GB18030.
 
-function decodePayload(bytes: Uint8ClampedArray | number[]): string {
+export function decodePayload(bytes: Uint8ClampedArray | number[]): string {
   const buf = new Uint8Array(bytes).buffer as ArrayBuffer;
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(buf);
@@ -49,11 +50,6 @@ function decodePayload(bytes: Uint8ClampedArray | number[]): string {
 }
 
 type AppState = "idle" | "processing" | "not-found" | "decode-error" | "error";
-
-const isMac =
-  typeof navigator !== "undefined" &&
-  /mac/i.test(navigator.userAgent) &&
-  !/iphone|ipad/i.test(navigator.userAgent);
 
 export default function App() {
   const [text, setText] = useState("");
@@ -68,55 +64,63 @@ export default function App() {
   // ── QR generation ──────────────────────────────────────────────────────────
 
   const renderQR = useCallback((content: string) => {
+    // The canvas is always mounted (see the JSX), so this ref is always set.
+    // State is still updated before drawing so an overflow error can be cleared
+    // by the next valid edit — that used to be impossible when the error text
+    // replaced the canvas and left this ref null.
     const canvas = qrCanvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d")!;
 
-    if (!content.trim()) {
+    const clear = () => {
       ctx.clearRect(0, 0, 420, 420);
+    };
+
+    if (!content.trim()) {
+      clear();
       setQrReady(false);
       setQrError("");
       return;
     }
 
+    let qr: ReturnType<typeof qrcode>;
     try {
-      const qr = qrcode(0, "M");
+      qr = qrcode(0, "M");
       qr.addData(content);
       qr.make();
-
-      const moduleCount = qr.getModuleCount();
-      const cellSize = Math.floor(388 / moduleCount);
-      const offset = Math.floor((388 - moduleCount * cellSize) / 2) + 16;
-
-      canvas.width = 420;
-      canvas.height = 420;
-
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, 420, 420);
-
-      ctx.fillStyle = "#000000";
-      for (let row = 0; row < moduleCount; row++) {
-        for (let col = 0; col < moduleCount; col++) {
-          if (qr.isDark(row, col)) {
-            ctx.fillRect(
-              offset + col * cellSize,
-              offset + row * cellSize,
-              cellSize,
-              cellSize
-            );
-          }
-        }
-      }
-
-      setQrReady(true);
-      setQrError("");
     } catch {
-      if (qrCanvasRef.current) {
-        qrCanvasRef.current.getContext("2d")!.clearRect(0, 0, 420, 420);
-      }
+      clear();
       setQrReady(false);
       setQrError("Content exceeds QR code capacity");
+      return;
     }
+
+    const moduleCount = qr.getModuleCount();
+    const cellSize = Math.floor(388 / moduleCount);
+    const offset = Math.floor((388 - moduleCount * cellSize) / 2) + 16;
+
+    canvas.width = 420;
+    canvas.height = 420;
+
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, 420, 420);
+
+    ctx.fillStyle = "#000000";
+    for (let row = 0; row < moduleCount; row++) {
+      for (let col = 0; col < moduleCount; col++) {
+        if (qr.isDark(row, col)) {
+          ctx.fillRect(
+            offset + col * cellSize,
+            offset + row * cellSize,
+            cellSize,
+            cellSize
+          );
+        }
+      }
+    }
+
+    setQrError("");
+    setQrReady(true);
   }, []);
 
   useEffect(() => {
@@ -132,60 +136,83 @@ export default function App() {
     const url = URL.createObjectURL(file);
     const img = new Image();
 
-    img.onload = () => {
-      const MAX_DIM = 2000;
-      let w = img.naturalWidth;
-      let h = img.naturalHeight;
-      log("[processImage] image loaded", { naturalWidth: w, naturalHeight: h });
-
-      if (w > MAX_DIM || h > MAX_DIM) {
-        const scale = MAX_DIM / Math.max(w, h);
-        w = Math.floor(w * scale);
-        h = Math.floor(h * scale);
-        log("[processImage] scaled down to", { w, h });
-      }
-
-      const offscreen = document.createElement("canvas");
-      offscreen.width = w;
-      offscreen.height = h;
-      const ctx = offscreen.getContext("2d")!;
-      ctx.drawImage(img, 0, 0, w, h);
-      URL.revokeObjectURL(url);
-
-      const imageData = ctx.getImageData(0, 0, w, h);
-      log("[processImage] running jsQR on", { w, h, dataLength: imageData.data.length });
-      const result = jsQR(imageData.data, w, h);
-      log(
-        "[processImage] jsQR result",
-        result
-          ? { data: result.data, byteLength: result.binaryData.length }
-          : null
-      );
-
-      // Decode the raw payload bytes rather than result.data: jsQR leaves
-      // `data` empty whenever the bytes aren't valid UTF-8 (see decodePayload).
-      // An empty result after that is a genuine decode failure, not "no QR".
-      const decoded = result ? decodePayload(result.binaryData) : "";
-      if (result && decoded !== result.data) {
-        log("[processImage] payload is not UTF-8, decoded via GB18030 fallback");
-      }
-      log("[processImage] decoded text length", decoded.length);
-
-      if (result && decoded !== "") {
-        setText(decoded);
-        setAppState("idle");
-      } else {
-        setAppState(result ? "decode-error" : "not-found");
-        setTimeout(() => setAppState("idle"), 2500);
-      }
+    // Clear the paste guard exactly once, whether decoding succeeded, failed,
+    // or the image never loaded. Without the timeout, a broken blob would leave
+    // processingRef stuck at true and swallow every later paste.
+    const releaseGuard = () => {
       processingRef.current = false;
+    };
+    const guardTimeout = setTimeout(() => {
+      logError("[processImage] timed out loading image, releasing guard");
+      URL.revokeObjectURL(url);
+      releaseGuard();
+      setAppState("error");
+      setTimeout(() => setAppState("idle"), 2500);
+    }, 5000);
+
+    img.onload = () => {
+      clearTimeout(guardTimeout);
+      try {
+        const MAX_DIM = 2000;
+        let w = img.naturalWidth;
+        let h = img.naturalHeight;
+        log("[processImage] image loaded", { naturalWidth: w, naturalHeight: h });
+
+        if (w > MAX_DIM || h > MAX_DIM) {
+          const scale = MAX_DIM / Math.max(w, h);
+          w = Math.floor(w * scale);
+          h = Math.floor(h * scale);
+          log("[processImage] scaled down to", { w, h });
+        }
+
+        const offscreen = document.createElement("canvas");
+        offscreen.width = w;
+        offscreen.height = h;
+        const ctx = offscreen.getContext("2d")!;
+        ctx.drawImage(img, 0, 0, w, h);
+        URL.revokeObjectURL(url);
+
+        const imageData = ctx.getImageData(0, 0, w, h);
+        log("[processImage] running jsQR on", { w, h, dataLength: imageData.data.length });
+        const result = jsQR(imageData.data, w, h);
+        log(
+          "[processImage] jsQR result",
+          result
+            ? { data: result.data, byteLength: result.binaryData.length }
+            : null
+        );
+
+        // Decode the raw payload bytes rather than result.data: jsQR leaves
+        // `data` empty whenever the bytes aren't valid UTF-8 (see decodePayload).
+        // An empty result after that is a genuine decode failure, not "no QR".
+        const decoded = result ? decodePayload(result.binaryData) : "";
+        if (result && decoded !== result.data) {
+          log("[processImage] payload is not UTF-8, decoded via GB18030 fallback");
+        }
+        log("[processImage] decoded text length", decoded.length);
+
+        if (result && decoded !== "") {
+          setText(decoded);
+          setAppState("idle");
+        } else {
+          setAppState(result ? "decode-error" : "not-found");
+          setTimeout(() => setAppState("idle"), 2500);
+        }
+      } catch (e) {
+        logError("[processImage] decode failed", e);
+        setAppState("error");
+        setTimeout(() => setAppState("idle"), 2500);
+      } finally {
+        releaseGuard();
+      }
     };
 
     img.onerror = (e) => {
+      clearTimeout(guardTimeout);
       logError("[processImage] image load error", e);
       URL.revokeObjectURL(url);
       setAppState("error");
-      processingRef.current = false;
+      releaseGuard();
       setTimeout(() => setAppState("idle"), 2500);
     };
 
@@ -200,10 +227,12 @@ export default function App() {
   //     Primary path on Windows. WebView2's ClipboardEvent.clipboardData
   //     sometimes doesn't expose image items, but the Clipboard API works
   //     reliably. processingRef prevents a second invocation from path 2.
+  //     Deliberately NOT registered on macOS: there the paste event is
+  //     reliable, and reading the clipboard here races the default paste
+  //     action, so the first ⌘V appeared to be swallowed.
   //
   //  2. paste event  →  ClipboardEvent.clipboardData
-  //     Primary path on macOS (and fallback on Windows when path 1 skips
-  //     because processingRef is already set).
+  //     The only path on macOS, and the fallback on Windows.
 
   useEffect(() => {
     const handleKeyDown = async (e: KeyboardEvent) => {
@@ -237,10 +266,6 @@ export default function App() {
 
     const handlePaste = (e: ClipboardEvent) => {
       log("[paste] event fired, processingRef=", processingRef.current);
-      if (processingRef.current) {
-        log("[paste] skipped (already processing)");
-        return;
-      }
 
       const items = Array.from(e.clipboardData?.items ?? []);
       log("[paste] clipboardData.items count:", items.length);
@@ -254,7 +279,15 @@ export default function App() {
         return;
       }
 
+      // Always claim the event for an image, even when another path is already
+      // handling it. Letting the default paste through here would have the
+      // native paste and our pipeline both touch the clipboard.
       e.preventDefault();
+      if (processingRef.current) {
+        log("[paste] skipped (already processing)");
+        return;
+      }
+
       log("[paste] found image item:", imageItem.type);
       const file = imageItem.getAsFile();
       log("[paste] getAsFile():", file ? `size=${file.size}` : "null");
@@ -264,7 +297,9 @@ export default function App() {
       }
     };
 
-    document.addEventListener("keydown", handleKeyDown);
+    // macOS relies on the paste event alone; only Windows needs the
+    // clipboard.read() path.
+    if (!isMac) document.addEventListener("keydown", handleKeyDown);
     document.addEventListener("paste", handlePaste);
     return () => {
       document.removeEventListener("keydown", handleKeyDown);
@@ -330,12 +365,12 @@ export default function App() {
 
       {/* Status line */}
       <p className={`text-xs h-4 transition-colors ${statusColor[appState] ?? "text-transparent"}`}>
-        {statusText[appState] ?? "placeholder"}
+        {statusText[appState] ?? ""}
       </p>
 
       {/* QR Code display */}
       <div
-        className="flex items-center justify-center"
+        className="relative flex items-center justify-center"
         style={{
           width: 420,
           height: 420,
@@ -344,25 +379,30 @@ export default function App() {
           boxSizing: "border-box",
         }}
       >
+        {/* Mounted unconditionally: unmounting it on error left
+            qrCanvasRef.current null, so renderQR could never clear the error. */}
+        <canvas
+          ref={qrCanvasRef}
+          width={420}
+          height={420}
+          className={qrReady ? undefined : "invisible"}
+        />
         {qrError ? (
-          <p className="text-red-500 text-sm text-center px-4">{qrError}</p>
-        ) : qrReady ? (
-          <canvas ref={qrCanvasRef} width={420} height={420} />
-        ) : (
-          <>
-            <canvas ref={qrCanvasRef} width={420} height={420} className="hidden" />
-            <div className="flex flex-col items-center gap-3 select-none">
-              <p className="text-zinc-400 text-sm">QR code will appear here</p>
-              <p className="text-zinc-300 text-xs text-center leading-relaxed">
-                Take a screenshot, then press{" "}
-                <kbd className="px-1.5 py-0.5 text-xs bg-zinc-100 text-zinc-500 rounded border border-zinc-200 font-mono">
-                  {pasteKey}
-                </kbd>{" "}
-                to detect QR codes
-              </p>
-            </div>
-          </>
-        )}
+          <p className="absolute inset-0 flex items-center justify-center text-red-500 text-sm text-center px-4">
+            {qrError}
+          </p>
+        ) : !qrReady ? (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 select-none">
+            <p className="text-zinc-400 text-sm">QR code will appear here</p>
+            <p className="text-zinc-300 text-xs text-center leading-relaxed">
+              Take a screenshot, then press{" "}
+              <kbd className="px-1.5 py-0.5 text-xs bg-zinc-100 text-zinc-500 rounded border border-zinc-200 font-mono">
+                {pasteKey}
+              </kbd>{" "}
+              to detect QR codes
+            </p>
+          </div>
+        ) : null}
       </div>
     </div>
   );
