@@ -1,6 +1,6 @@
 [package]
 name = "qr-converter"
-version = "0.2.1"
+version = "0.2.2"
 description = "QR Code Converter"
 authors = []
 edition = "2021"

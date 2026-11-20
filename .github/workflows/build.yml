@@ -45,11 +45,17 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            args: --target universal-apple-darwin
-            artifact_name: macos
+            args: --target aarch64-apple-darwin --bundles dmg
+            asset_pattern: "QR.Converter_[version]_macos-[arch][ext]"
+            artifact_name: macos-arm64
           - os: windows-latest
             args: --target x86_64-pc-windows-msvc --bundles nsis
-            artifact_name: windows
+            asset_pattern: "QR.Converter_[version]_windows-[arch]-online[setup][ext]"
+            artifact_name: windows-online
+          - os: windows-latest
+            args: --target x86_64-pc-windows-msvc --bundles nsis --config src-tauri/tauri.offline.conf.json
+            asset_pattern: "QR.Converter_[version]_windows-[arch]-offline[setup][ext]"
+            artifact_name: windows-offline
 
     runs-on: ${{ matrix.os }}
 
@@ -65,15 +71,15 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Add macOS universal targets
+      - name: Add macOS arm64 target
         if: matrix.os == 'macos-latest'
-        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+        run: rustup target add aarch64-apple-darwin
 
       - name: Install frontend dependencies
         run: npm ci
 
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -81,10 +87,16 @@ jobs:
           releaseName: QR Converter ${{ github.ref_name }}
           releaseBody: |
             ## Downloads
-            - **macOS** (universal · Apple Silicon + Intel): `.dmg`
-            - **Windows** (x64 · Windows 10 1809/LTSC or later): offline `.exe` installer (NSIS).
-              It embeds the WebView2 offline runtime (~130 MB installer) and installs it silently
-              only when WebView2 is missing or older than 109.0.1518.140.
+            - **macOS (Apple Silicon / arm64)**: `.dmg`
+            - **Windows online (x64 · no embedded WebView2)**: small `.exe`; downloads and installs
+              WebView2 only if it is missing or older than 109.0.1518.140 (internet required).
+            - **Windows offline (x64 · WebView2 embedded)**: large `.exe` (~300 MB); installs
+              WebView2 from the embedded offline runtime only if it is missing or older than
+              109.0.1518.140 (no internet required). This variant installs per-machine and
+              requires administrator rights; the online variant keeps the per-user default.
+
+            Minimum Windows: Windows 10 1809/LTSC or later.
           releaseDraft: true
           prerelease: false
+          releaseAssetNamePattern: ${{ matrix.asset_pattern }}
           args: ${{ matrix.args }}
