@@ -1,6 +1,6 @@
 {
   "name": "qr-converter",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,7 +11,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "build:mac": "rustup target add aarch64-apple-darwin x86_64-apple-darwin && npm run tauri build -- --target universal-apple-darwin",
-    "build:win": "npm run tauri build -- --target x86_64-pc-windows-msvc"
+    "build:win": "npm run tauri build -- --target x86_64-pc-windows-msvc --bundles nsis"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

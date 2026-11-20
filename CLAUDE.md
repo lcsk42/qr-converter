@@ -19,7 +19,7 @@ npm run test:rust      # cargo test, backend
 
 No linter or formatter is configured.
 
-Packaging: `npm run build:mac` produces a universal macOS `.dmg` (requires both apple-* rustup targets); `npm run build:win` a Windows x64 installer. CI (`.github/workflows/build.yml`) runs on `v*` tags or manual dispatch and creates a **draft** GitHub release via `tauri-apps/tauri-action`.
+Packaging: `npm run build:mac` produces a universal macOS `.dmg` (requires both apple-* rustup targets). `npm run build:win` produces a Windows x64 **offline NSIS `.exe`** only (`--bundles nsis`): it embeds Microsoft's WebView2 offline installer and, at install time, silently installs WebView2 only when it is missing or older than `109.0.1518.140`. The NSIS installer is per-machine, so it needs admin rights; the target floor is Windows 10 1809/LTSC. Expect a ~130 MB Windows installer because the WebView2 payload is embedded. The relevant config is `bundle.windows.webviewInstallMode` / `bundle.windows.nsis` in `tauri.conf.json`; do not switch to `fixedRuntime` (≈180 MB, manually updated) unless Windows 7/8.1 support is explicitly required. CI (`.github/workflows/build.yml`) runs on `v*` tags or manual dispatch, builds NSIS-only on Windows, and creates a **draft** GitHub release via `tauri-apps/tauri-action`.
 
 ### Tests
 

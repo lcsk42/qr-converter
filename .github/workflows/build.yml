@@ -48,7 +48,7 @@ jobs:
             args: --target universal-apple-darwin
             artifact_name: macos
           - os: windows-latest
-            args: --target x86_64-pc-windows-msvc
+            args: --target x86_64-pc-windows-msvc --bundles nsis
             artifact_name: windows
 
     runs-on: ${{ matrix.os }}
@@ -82,7 +82,9 @@ jobs:
           releaseBody: |
             ## Downloads
             - **macOS** (universal · Apple Silicon + Intel): `.dmg`
-            - **Windows** (x64): `.msi` or `.exe` installer
+            - **Windows** (x64 · Windows 10 1809/LTSC or later): offline `.exe` installer (NSIS).
+              It embeds the WebView2 offline runtime (~130 MB installer) and installs it silently
+              only when WebView2 is missing or older than 109.0.1518.140.
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
