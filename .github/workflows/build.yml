@@ -45,9 +45,9 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            args: --target aarch64-apple-darwin --bundles dmg
-            asset_pattern: "QR.Converter_[version]_macos-[arch][ext]"
-            artifact_name: macos-arm64
+            args: --target universal-apple-darwin
+            asset_pattern: "QR.Converter_[version]_universal[ext]"
+            artifact_name: macos-universal
           - os: windows-latest
             args: --target x86_64-pc-windows-msvc --bundles nsis
             asset_pattern: "QR.Converter_[version]_windows-[arch]-online[setup][ext]"
@@ -71,9 +71,9 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Add macOS arm64 target
+      - name: Add macOS universal targets
         if: matrix.os == 'macos-latest'
-        run: rustup target add aarch64-apple-darwin
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       - name: Install frontend dependencies
         run: npm ci
@@ -87,7 +87,7 @@ jobs:
           releaseName: QR Converter ${{ github.ref_name }}
           releaseBody: |
             ## Downloads
-            - **macOS (Apple Silicon / arm64)**: `.dmg`
+            - **macOS (universal · Apple Silicon + Intel)**: `.dmg`
             - **Windows online (x64 · no embedded WebView2)**: small `.exe`; downloads and installs
               WebView2 only if it is missing or older than 109.0.1518.140 (internet required).
             - **Windows offline (x64 · WebView2 embedded)**: large `.exe` (~300 MB); installs
