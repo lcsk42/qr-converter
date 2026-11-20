@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App";
-import { decodeCanvas } from "./test/helpers";
+import { MAX_CONTENT_BYTES, parseSegment } from "./segments";
+import { decodeCanvas, decodeCanvasWithZXing } from "./test/helpers";
 
 // Text → QR generation. Runs against the real canvas backend, so "a QR
 // appeared" means pixels were actually drawn and can be decoded again.
@@ -10,7 +11,9 @@ import { decodeCanvas } from "./test/helpers";
 const qrCanvas = () => document.querySelector("canvas") as HTMLCanvasElement;
 const textarea = () =>
   screen.getByPlaceholderText("Enter text to generate a QR code") as HTMLTextAreaElement;
-const CAPACITY_ERROR = "Content exceeds QR code capacity";
+const segmentCards = () =>
+  Array.from(document.querySelectorAll<HTMLCanvasElement>("canvas[data-segment-index]"));
+const sheetSummary = () => screen.getByText(/QR codes ·/);
 
 describe("QR generation", () => {
   it("shows the empty state before any text is entered", () => {
@@ -67,61 +70,99 @@ describe("QR generation", () => {
     await waitFor(() => expect(decodeCanvas(qrCanvas())).toBe("second"));
   });
 
-  it("shows an error and keeps the canvas mounted when content is too large", async () => {
+  it("splits content beyond a single QR into a sheet of segments", async () => {
     const user = userEvent.setup();
     render(<App />);
+    const content = "a".repeat(2400);
 
     await user.click(textarea());
-    await user.paste("a".repeat(2400));
+    await user.paste(content);
 
-    await waitFor(() => expect(screen.getByText(CAPACITY_ERROR)).toBeInTheDocument());
-    // The regression this guards: the canvas used to be unmounted on error, and
-    // the resulting null ref made every later render bail out permanently.
-    expect(qrCanvas()).toBeInTheDocument();
+    await waitFor(() => expect(sheetSummary()).toBeInTheDocument());
+    const cards = segmentCards();
+    expect(cards).toHaveLength(2);
+
+    const payloads = await Promise.all(cards.map(decodeCanvasWithZXing));
+    for (const [index, decoded] of payloads.entries()) {
+      expect(decoded).toHaveLength(1);
+      const segment = parseSegment(new TextEncoder().encode(decoded[0]));
+      expect(segment).not.toBeNull();
+      expect(segment).toMatchObject({ index, total: 2 });
+    }
+    expect(payloads[0][0].startsWith("QRS1")).toBe(true);
+    expect(textarea().value).toBe(content);
   });
 
-  it("recovers from the capacity error once the text gets smaller", async () => {
+  it("returns to a single QR when the text shrinks", async () => {
     const user = userEvent.setup();
     render(<App />);
 
     await user.click(textarea());
     await user.paste("a".repeat(2400));
-    await waitFor(() => expect(screen.getByText(CAPACITY_ERROR)).toBeInTheDocument());
+    await waitFor(() => expect(sheetSummary()).toBeInTheDocument());
 
     await user.clear(textarea());
     await user.paste("ok");
 
-    await waitFor(() => expect(screen.queryByText(CAPACITY_ERROR)).not.toBeInTheDocument());
-    expect(decodeCanvas(qrCanvas())).toBe("ok");
+    await waitFor(() =>
+      expect(screen.queryByText(/QR codes ·/)).not.toBeInTheDocument()
+    );
+    await waitFor(() => expect(decodeCanvas(qrCanvas())).toBe("ok"));
   });
 
-  it("clears the error when all text is deleted", async () => {
+  it("clears the sheet when all text is deleted", async () => {
     const user = userEvent.setup();
     render(<App />);
 
     await user.click(textarea());
     await user.paste("a".repeat(2400));
-    await waitFor(() => expect(screen.getByText(CAPACITY_ERROR)).toBeInTheDocument());
+    await waitFor(() => expect(segmentCards()).toHaveLength(2));
 
     await user.clear(textarea());
 
-    await waitFor(() => expect(screen.queryByText(CAPACITY_ERROR)).not.toBeInTheDocument());
-    expect(screen.getByText("QR code will appear here")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByText("QR code will appear here")).toBeInTheDocument()
+    );
+    expect(segmentCards()).toHaveLength(0);
   });
 
-  it("recovers right at the 2331-byte boundary", async () => {
+  it("switches from a sheet to a single QR at the 2,331-byte boundary", async () => {
     const user = userEvent.setup();
     render(<App />);
 
     await user.click(textarea());
     await user.paste("a".repeat(2332));
-    await waitFor(() => expect(screen.getByText(CAPACITY_ERROR)).toBeInTheDocument());
+    await waitFor(() => expect(segmentCards()).toHaveLength(2));
 
     await user.clear(textarea());
     await user.paste("a".repeat(2331));
 
-    await waitFor(() => expect(screen.queryByText(CAPACITY_ERROR)).not.toBeInTheDocument());
-    expect(qrCanvas().className).not.toContain("invisible");
+    await waitFor(() => expect(segmentCards()).toHaveLength(0));
+    await waitFor(
+      () => expect(decodeCanvas(qrCanvas())).toBe("a".repeat(2331)),
+      { timeout: 5000 }
+    );
+  });
+
+  it("shows a limit error beyond 255 segments and recovers", async () => {
+    render(<App />);
+    const tooLarge = "a".repeat(MAX_CONTENT_BYTES + 1);
+
+    fireEvent.change(textarea(), { target: { value: tooLarge } });
+
+    await waitFor(() =>
+      expect(screen.getByText(/Content exceeds the multi-code limit/)).toBeInTheDocument()
+    );
+    // The regression this guards: the canvas used to be unmounted on error, so
+    // the null ref made every later render bail out permanently.
+    expect(qrCanvas()).toBeInTheDocument();
+
+    fireEvent.change(textarea(), { target: { value: "ok" } });
+
+    await waitFor(() =>
+      expect(screen.queryByText(/Content exceeds the multi-code limit/)).not.toBeInTheDocument()
+    );
+    await waitFor(() => expect(decodeCanvas(qrCanvas())).toBe("ok"));
   });
 
   it("treats whitespace-only text as empty", async () => {

@@ -5,6 +5,8 @@ import { invoke } from "@tauri-apps/api/core";
 import App from "./App";
 import { installPastePipeline } from "./test/setup";
 import {
+  composeCards,
+  decodeCanvas,
   dispatchPaste,
   makeImageFile,
   makePasteEvent,
@@ -23,6 +25,7 @@ import { gbkEncode } from "./test/gbk";
 const textarea = () =>
   screen.getByPlaceholderText("Enter text to generate a QR code") as HTMLTextAreaElement;
 const status = () => document.querySelector("p.text-xs") as HTMLParagraphElement;
+const qrCanvas = () => document.querySelector("canvas") as HTMLCanvasElement;
 const logMessages = () =>
   vi.mocked(invoke).mock.calls.map(([, args]) => String((args as { message: string }).message));
 
@@ -54,6 +57,19 @@ describe("paste → decode", () => {
 
     await waitFor(() => expect(textarea().value).toBe("hello from qr"));
     expect(status().textContent).toBe("");
+  });
+
+  it("shows the first of several plain QR codes in reading order", async () => {
+    render(<App />);
+    const left = renderQRToCanvas("left code");
+    const right = renderQRToCanvas("right code");
+
+    await pasteImage(composeCards([left, right], 2, 20));
+
+    await waitFor(() => expect(textarea().value).toBe("left code"));
+    await waitFor(() =>
+      expect(status().textContent).toBe("Found 2 QR codes; showing the first one.")
+    );
   });
 
   it("decodes a UTF-8 Chinese payload", async () => {
@@ -245,13 +261,16 @@ describe("paste → decode", () => {
     await waitFor(() => expect(textarea().value).toBe("after throw"));
   });
 
-  it("downscales a very large image before decoding", async () => {
+  it("keeps a 3000px screenshot at native resolution for dense codes", async () => {
     render(<App />);
     await pasteImage(renderQRToCanvas("large image", 3000));
 
     await waitFor(() => expect(textarea().value).toBe("large image"));
-    // Longest side clamps to 2000 while preserving the square aspect ratio.
-    expect(logMessages().join("\n")).toContain('{"w":2000,"h":2000}');
+    // Multi-code pages can have 1-device-pixel modules; downscaling them to
+    // 2000 px would destroy them. The 24 MP budget leaves 3000×3000 untouched.
+    const logs = logMessages().join("\n");
+    expect(logs).toContain('{"naturalWidth":3000,"naturalHeight":3000}');
+    expect(logs).not.toContain("scaled down to");
   });
 
   it("replaces the previous text instead of appending", async () => {
@@ -324,6 +343,41 @@ describe("paste → decode", () => {
 
     expect(event.defaultPrevented).toBe(false);
     expect(logMessages().join("\n")).not.toContain("[paste]");
+  });
+});
+
+describe("compress-whitespace button", () => {
+  it("removes all whitespace and regenerates the QR code", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(textarea());
+    await user.paste("a b  c\nd\te");
+    await user.click(screen.getByTitle("Compress whitespace"));
+
+    expect(textarea().value).toBe("abcde");
+    await waitFor(() => expect(decodeCanvas(qrCanvas())).toBe("abcde"));
+  });
+
+  it("removes tabs, newlines, full-width spaces and NBSP", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(textarea());
+    await user.paste("a\tb\nc　d e");
+    await user.click(screen.getByTitle("Compress whitespace"));
+
+    expect(textarea().value).toBe("abcde");
+  });
+
+  it("is a no-op when there is no whitespace", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.type(textarea(), "abc");
+    await user.click(screen.getByTitle("Compress whitespace"));
+
+    expect(textarea().value).toBe("abc");
   });
 });
 

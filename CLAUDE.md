@@ -27,14 +27,18 @@ Packaging: `npm run build:mac` produces a universal macOS `.dmg` (requires both 
 
 | File | Covers |
 |------|--------|
+| `src/segments.test.ts` | 18-byte envelope, CRC32, UTF-8-safe splitting, 255-segment/max-content limits, out-of-order reassembly |
+| `src/decode.test.ts` | zxing multi-code decoding, image pixel-budget helper |
+| `src/qrRender.test.ts` | DPR 1/1.25/1.5/2 rendering, max-size V40 cards, clear/overflow |
 | `src/decodePayload.test.ts` | UTF-8 → GB18030 fallback, empty/garbage payloads |
-| `src/App.qr.test.tsx` | text → QR, capacity overflow and recovery, empty/whitespace |
-| `src/App.paste.test.tsx` | paste → decode, statuses, guard/refcount, copy button |
+| `src/App.qr.test.tsx` | single ↔ segment-sheet boundary (2,331 B), segment headers, limit error, empty/whitespace |
+| `src/App.sheet.test.tsx` | pagination + capture mode, out-of-order multi-page restore, CRC failure |
+| `src/App.paste.test.tsx` | paste → decode (single, multi-code, GBK), statuses, guard/refcount, copy / compress-whitespace buttons |
 | `src/App.mac.test.tsx` / `src/App.win.test.tsx` | which paste paths each platform registers |
 
 Two things make the component tests able to run in jsdom without faking the QR pipeline itself:
 
-- `src/test/setup.ts` gives `HTMLCanvasElement.getContext` a real `@napi-rs/canvas` backing, so drawn pixels can be read back and fed to `jsQR`. Tests therefore do a genuine round trip (draw → `getImageData` → decode) rather than asserting on `fillRect` call counts. It also mocks `@tauri-apps/api/core`'s `invoke`, and provides `installPastePipeline()` — processImage's *offscreen* canvas synthesises the pasted image's pixels through it.
+- `src/test/setup.ts` gives `HTMLCanvasElement.getContext` a real `@napi-rs/canvas` backing, so drawn pixels can be read back and fed to zxing/jsQR. Tests therefore do a genuine round trip (draw → `getImageData` → decode) rather than asserting on `fillRect` call counts. It also mocks `@tauri-apps/api/core`'s `invoke`, injects the zxing wasm binary via `prepareZXingModule({ wasmBinary })`, and provides `installPastePipeline()` — processImage's *offscreen* canvas synthesises the pasted image's pixels through it.
 - `src/platform.ts` exists only so `isMac` can be pinned with `vi.mock("./platform")`; the mac/win test files would otherwise be unreachable on one host OS or the other.
 
 `src/test/gbk.ts` derives GBK byte sequences by inverting Node's own GB18030 `TextDecoder` instead of hard-coding a hex table (hand-written values were wrong the first time). Use it rather than pasting hex when adding fixtures.
@@ -47,17 +51,47 @@ Tauri 2 desktop app: React 18 + TypeScript + Vite + Tailwind frontend, Rust back
 
 | Layer | Path |
 |-------|------|
-| Frontend (all logic in one component) | `src/App.tsx` |
+| App UI, paste pipeline, segment accumulator | `src/App.tsx` |
+| Multi-QR envelope / split / CRC / reassembly | `src/segments.ts` |
+| zxing-wasm multi-code decoder + jsQR fallback | `src/decode.ts` |
+| DPR-aware QR drawing | `src/qrRender.ts` |
 | Backend (all Tauri commands) | `src-tauri/src/lib.rs` |
 | `main.rs` is just `app_lib::run()` | `src-tauri/src/main.rs` |
 | Tauri config / capabilities | `src-tauri/tauri.conf.json`, `src-tauri/capabilities/default.json` |
 
-Window is fixed to a 1024×768 minimum; UI is a single textarea, a status line, and a 420×420 QR canvas.
+Window is fixed to a 1024×768 minimum. The UI is a textarea, a status line, and either a 420×420 single-QR canvas or a paginated 4×3 sheet (12 cards of 210 px each; “Capture mode” hides the editor for clean page screenshots).
 
 ### Two features
 
-1. **Text → QR (pure frontend).** `renderQR` in `App.tsx` uses `qrcode-generator` (error correction level `M`, auto version) and draws modules onto the canvas manually: module size = `floor(388 / moduleCount)`, centered within a 388 px inner area, +16 px padding → 420×420 canvas. Re-renders on every `text` change. Content too large for a QR → `qrError` string instead of a canvas.
-2. **Image → text (paste).** A pasted image goes to `processImage`, which decodes it into an offscreen canvas (downscaled so the longest side ≤ 2000 px), then `jsQR`. A result is written into the same `text` state, so the generated QR immediately updates. Failures set `appState` to `not-found`/`error`, auto-reset to `idle` after 2.5 s.
+1. **Text → QR (pure frontend).** `createQRPlan()` in `segments.ts` decides between the single-QR and multi-QR paths:
+   - ≤ 2,331 UTF-8 bytes → one QR. `qrRender.ts` uses `qrcode-generator` (level `M`, auto version) and draws modules manually.
+   - Larger → split into segments (see below). The sheet shows 4×3 cards per page and the embedded index defines the order; the UI offers pagination and a capture mode.
+   - Rendering is DPR-aware: canvas backing = CSS size × `devicePixelRatio`, and modules use an integer device-pixel cell size. This keeps 1–2 px modules crisp under 125%/150% OS scaling. Do not replace it with a fixed 420 backing store.
+   - Content over 589,815 bytes (255 segments) → an error. The single canvas stays mounted so the error can clear when the text shrinks.
+2. **Image → text (paste).** `processImage` draws the pasted image into an offscreen canvas, then `decodeQRCodes()` (`decode.ts`) runs **zxing-wasm** and returns *all* QR codes in the image (jsQR only returns one). Images are capped at a 24 MP pixel budget, not the old 2,000 px longest side: a dense card has 1-device-pixel modules and downscaling destroys them. Results are written into `text` (single/plain path) or accumulated per transfer (segmented path). Failures set `appState` to `not-found`/`error`; statuses auto-reset after 2.5 s, restored/checksum statuses after 4 s.
+
+### Multi-QR protocol (`src/segments.ts`)
+
+Each segment starts with an 18-byte ASCII header, followed by a UTF-8 slice of the original text:
+
+```
+0..3    "QRS1"                                      magic + version
+4..11   CRC32 of the complete UTF-8 content         transfer id + integrity check
+12..14  segment index, 3 decimal digits (000..254)
+15..17  segment total, 3 decimal digits (002..255)
+18..    segment data
+```
+
+- Segment capacity = 2,331 − 18 = **2,313 data bytes**. A transfer is capped at **255 segments / 589,815 bytes** (~576 KiB, ~196k Chinese characters). The CRC doubles as the transfer id, so segments from different generations cannot be mixed silently.
+- Splitting happens at Unicode code-point boundaries (`Array.from` + UTF-8 length), so Chinese/emoji are never cut in half. Lone surrogates are normalised with `toWellFormed()` because qrcode-generator's UTF-8 encoder handles them differently from `TextEncoder`.
+- Reassembly ignores paste order and spatial layout: it sorts by `index`, verifies `total`, concatenates, checks CRC32, then decodes strict UTF-8. `App.tsx` keeps up to three pending transfers keyed by CRC; a partial paste updates the status and **does not** overwrite the textarea.
+- Page layout is 12 cards (4×3, 210 px) per screenshot in the minimum window. 255 segments → 22 pages; 64 segments → 6 pages. The end-to-end test in `App.sheet.test.tsx` renders pages, composites the card pixels into a screenshot, and pastes pages out of order.
+
+### Decoder / WASM notes
+
+- `zxing-wasm@3.1.7`'s reader wasm (≈946 KB) is bundled locally through Vite's `?url` import; `decode.ts` overrides zxing's default jsDelivr CDN path with `prepareZXingModule({ locateFile })` and preloads it from an effect. If the wasm asset fails, `decodeQRCodes` falls back to jsQR (single-code only) rather than breaking the app.
+- Vitest cannot fetch the bundled wasm, so `src/test/setup.ts` injects `wasmBinary` with `readFileSync` and `decode.ts` skips its production setup when `import.meta.env.MODE === "test"`. Keep both halves if you touch decoder init.
+- `readBarcodes` returns raw `bytes`; always use those (not `text`) so the existing GB18030 fallback in `decodePayload` keeps working.
 
 ### Paste handling
 

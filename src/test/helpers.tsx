@@ -3,6 +3,8 @@ import { act } from "@testing-library/react";
 import jsQR from "jsqr";
 import qrcode from "qrcode-generator";
 import { decodePayload } from "../App";
+import { decodeQRCodes } from "../decode";
+import { canvasBitmap } from "./setup";
 
 // ── QR rendering ─────────────────────────────────────────────────────────────
 // Mirrors App.renderQR's geometry (level M, floor(388/moduleCount) cells, 16px
@@ -106,6 +108,41 @@ export function decodeCanvas(canvas: HTMLCanvasElement): string | null {
   const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const result = jsQR(data, width, height);
   return result ? decodePayload(result.binaryData) : null;
+}
+
+/** Decodes every QR code in a canvas through the real zxing pipeline. */
+export async function decodeCanvasWithZXing(canvas: HTMLCanvasElement): Promise<string[]> {
+  const ctx = canvas.getContext("2d")!;
+  const data = ctx.getImageData(0, 0, canvas.width, canvas.height) as unknown as ImageData;
+  const results = await decodeQRCodes(data);
+  return results.map((result) => result.text);
+}
+
+/**
+ * Composites rendered QR cards into one image, the way a screenshot of a sheet
+ * page would look. Cards are drawn at their native (device-pixel) size.
+ */
+export function composeCards(
+  cards: HTMLCanvasElement[],
+  columns = 4,
+  gap = 8
+): HTMLCanvasElement {
+  if (cards.length === 0) throw new Error("composeCards needs at least one card");
+  const cardSize = cards[0].width;
+  const rows = Math.ceil(cards.length / columns);
+  const sheet = document.createElement("canvas");
+  sheet.width = columns * cardSize + (columns - 1) * gap;
+  sheet.height = rows * cardSize + (rows - 1) * gap;
+  const ctx = sheet.getContext("2d")!;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, sheet.width, sheet.height);
+
+  cards.forEach((card, index) => {
+    const x = (index % columns) * (cardSize + gap);
+    const y = Math.floor(index / columns) * (cardSize + gap);
+    ctx.drawImage(canvasBitmap(card) as never, x, y);
+  });
+  return sheet;
 }
 
 // ── ClipboardEvent construction ──────────────────────────────────────────────

@@ -1,6 +1,9 @@
 import { afterEach, beforeAll, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
 import { createCanvas } from "@napi-rs/canvas";
+import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
+import { prepareZXingModule } from "zxing-wasm/reader";
 // Registers toBeInTheDocument / toHaveBeenCalledWith-style DOM matchers and
 // augments vitest's Assertion type. Without it tsc rejects the matchers and
 // every DOM assertion throws "Invalid Chai property".
@@ -64,6 +67,11 @@ function backingCanvas(source: HTMLCanvasElement) {
   return (source as Backed).__ctx?.canvas ?? null;
 }
 
+/** The native @napi-rs bitmap behind a jsdom canvas, for drawImage in tests. */
+export function canvasBitmap(source: HTMLCanvasElement): HTMLCanvasElement {
+  return (backingCanvas(source) ?? source) as unknown as HTMLCanvasElement;
+}
+
 function wrapWithPipeline(canvas: Backed, ctx: CanvasRenderingContext2D) {
   const { source, throwOnDraw } = pipeline!;
   return new Proxy(ctx, {
@@ -113,6 +121,21 @@ beforeAll(() => {
     if (pipeline && !this.__legacy) return wrapWithPipeline(this, ctx);
     return ctx;
   };
+});
+
+// ── zxing-wasm ───────────────────────────────────────────────────────────────
+// src/decode.ts deliberately skips its production `locateFile` setup when
+// MODE === "test" (Vite cannot fetch a bundled wasm asset in jsdom), so inject
+// the binary directly. This runs before every test file's tests and shares one
+// compiled module across the file.
+
+beforeAll(async () => {
+  const require = createRequire(import.meta.url);
+  const wasmPath = require.resolve("zxing-wasm/reader/zxing_reader.wasm");
+  await prepareZXingModule({
+    overrides: { wasmBinary: readFileSync(wasmPath) },
+    fireImmediately: true,
+  });
 });
 
 // ── Object URLs ──────────────────────────────────────────────────────────────
